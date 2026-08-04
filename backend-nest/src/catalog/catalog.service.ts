@@ -26,7 +26,9 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
  */
 @Injectable()
 export class CatalogService {
-  private cache: { at: number; raw: Record<string, unknown>[] } | null = null;
+  private cache: { at: number; raw: Record<string, unknown>[]; source: string } | null = null;
+  /** Source réellement utilisée pour la dernière lecture (api | mock | mock-fallback). */
+  private lastSource = 'mock';
 
   /**
    * Injecte la configuration applicative et les dépôts TypeORM nécessaires à la synchronisation.
@@ -37,56 +39,122 @@ export class CatalogService {
     @InjectRepository(GateReview) private readonly gates: Repository<GateReview>,
   ) {}
 
+  /** Retourne la source catalogue effective (utile pour l'UI / healthcheck). */
+  getDataSourceLabel(): string {
+    return this.lastSource || this.config.get('DATA_SOURCE') || 'api';
+  }
+
+  private mockRaw(): Record<string, unknown>[] {
+    return [
+      {
+        ItemNo: 'ART-1001',
+        Description: 'Huile olive 1L',
+        Marque: 'OLIVA',
+        FinalPrice: 42,
+        Stock: 120,
+        CustomerPrice: 48,
+        DiscountPercent: 5,
+        FinalPriceInclVAT: 50.4,
+        Colisage: 12,
+      },
+      {
+        ItemNo: 'ART-1002',
+        Description: 'Huile olive 5L',
+        Marque: 'OLIVA',
+        FinalPrice: 180,
+        Stock: 40,
+        CustomerPrice: 195,
+        DiscountPercent: 0,
+        FinalPriceInclVAT: 216,
+        Colisage: 4,
+      },
+      {
+        ItemNo: 'ART-2001',
+        Description: 'Biscuits multi-céréales',
+        Marque: 'BAUDUCCO',
+        FinalPrice: 18,
+        Stock: 0,
+        CustomerPrice: 22,
+        DiscountPercent: 10,
+        FinalPriceInclVAT: 21.6,
+        Colisage: 24,
+      },
+      {
+        ItemNo: 'ART-2002',
+        Description: 'Gâteau cacao',
+        Marque: 'BAUDUCCO',
+        FinalPrice: 25,
+        Stock: 85,
+        CustomerPrice: 29,
+        DiscountPercent: 0,
+        FinalPriceInclVAT: 30,
+        Colisage: 12,
+      },
+      {
+        ItemNo: 'ART-3001',
+        Description: 'Thé vert 100s',
+        Marque: 'DEMO',
+        FinalPrice: 35,
+        Stock: 200,
+        CustomerPrice: 40,
+        DiscountPercent: 0,
+        FinalPriceInclVAT: 42,
+        Colisage: 10,
+      },
+    ];
+  }
+
   private async fetchRaw(force = false): Promise<Record<string, unknown>[]> {
     if (!force && this.cache && Date.now() - this.cache.at < CACHE_TTL_MS) {
+      this.lastSource = this.cache.source;
       return this.cache.raw;
     }
 
-    const source = (this.config.get('DATA_SOURCE') || 'api').toLowerCase();
+    const configured = (this.config.get('DATA_SOURCE') || 'api').toLowerCase();
     let raw: Record<string, unknown>[];
+    let source = configured;
 
-    if (source === 'mock') {
-      raw = [
-        {
-          ItemNo: 'ART-1001',
-          Description: 'Demo item',
-          Marque: 'DEMO',
-          FinalPrice: 10,
-          Stock: 100,
-          CustomerPrice: 12,
-          DiscountPercent: 0,
-          FinalPriceInclVAT: 14.4,
-          Colisage: 12,
-        },
-      ];
+    if (configured === 'mock') {
+      raw = this.mockRaw();
+      source = 'mock';
     } else {
-      const base = this.config.get('FGT_API_BASE_URL') || 'http://192.168.1.125:7691';
-      const res = await fetch(`${base.replace(/\/$/, '')}/api/articleList`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          customerNo: this.config.get('FGT_CUSTOMER_NO') || 'CA000500',
-          typeDoc: this.config.get('FGT_TYPE_DOC') || 'VENTE',
-        }),
-      });
-      if (!res.ok) throw new Error(`FGT API error ${res.status}`);
-      const data = (await res.json()) as {
-        success?: boolean;
-        ArticleList?: string | { Items: unknown[] };
-      };
-      if (!data.success) throw new Error('FGT API success=false');
-      let articleList = data.ArticleList;
-      if (typeof articleList === 'string') articleList = JSON.parse(articleList);
-      raw = ((articleList as { Items?: Record<string, unknown>[] })?.Items || []) as Record<
-        string,
-        unknown
-      >[];
+      try {
+        const base = this.config.get('FGT_API_BASE_URL') || 'http://192.168.1.125:7691';
+        const res = await fetch(`${base.replace(/\/$/, '')}/api/articleList`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            customerNo: this.config.get('FGT_CUSTOMER_NO') || 'CA000500',
+            typeDoc: this.config.get('FGT_TYPE_DOC') || 'VENTE',
+          }),
+        });
+        if (!res.ok) throw new Error(`FGT API error ${res.status}`);
+        const data = (await res.json()) as {
+          success?: boolean;
+          ArticleList?: string | { Items: unknown[] };
+        };
+        if (!data.success) throw new Error('FGT API success=false');
+        let articleList = data.ArticleList;
+        if (typeof articleList === 'string') articleList = JSON.parse(articleList);
+        raw = ((articleList as { Items?: Record<string, unknown>[] })?.Items || []) as Record<
+          string,
+          unknown
+        >[];
+        source = 'api';
+      } catch (err) {
+        // Cloud (Railway) ne peut pas joindre l'API LAN FGT → catalogue de démo
+        console.warn(
+          `[catalog] FGT API unreachable, fallback mock: ${err instanceof Error ? err.message : err}`,
+        );
+        raw = this.mockRaw();
+        source = 'mock-fallback';
+      }
     }
 
-    this.cache = { at: Date.now(), raw };
+    this.lastSource = source;
+    this.cache = { at: Date.now(), raw, source };
     return raw;
   }
-
   /**
    * Liste les articles FGT normalisés depuis l'API ou le mode mock.
    * Peut filtrer par marque et forcer le rafraîchissement du cache.

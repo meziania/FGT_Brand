@@ -31,7 +31,7 @@ export class CatalogController {
     const items = await this.catalog.listItems(brand, force === '1');
     const n = Math.max(1, Math.min(Number(limit) || 100, 500));
     return {
-      data_source: this.config.get('DATA_SOURCE') || 'api',
+      data_source: this.catalog.getDataSourceLabel(),
       count: items.length,
       items: items.slice(0, n),
       cached: force !== '1',
@@ -46,7 +46,7 @@ export class CatalogController {
   async brands(@Query('force') force?: string) {
     const brands = await this.catalog.listBrands(force === '1');
     return {
-      data_source: this.config.get('DATA_SOURCE') || 'api',
+      data_source: this.catalog.getDataSourceLabel(),
       count: brands.length,
       brands,
       cached: force !== '1',
@@ -61,7 +61,7 @@ export class CatalogController {
   async syncBrands(@Query('force') force?: string) {
     const result = await this.catalog.syncBrandsToPilotage(force === '1');
     return {
-      data_source: this.config.get('DATA_SOURCE') || 'api',
+      data_source: this.catalog.getDataSourceLabel(),
       ...result,
     };
   }
@@ -74,7 +74,7 @@ export class CatalogController {
   async stockAlerts() {
     const alerts = await this.catalog.stockAlerts();
     return {
-      data_source: this.config.get('DATA_SOURCE') || 'api',
+      data_source: this.catalog.getDataSourceLabel(),
       count: alerts.length,
       alerts,
     };
