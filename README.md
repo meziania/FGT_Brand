@@ -57,20 +57,22 @@ npm run dev
 `articleList` fournit articles / marques / stock / prix.  
 CA, forecast, DN, réachat ne sont pas dans cette API → Health Score les met à 70 (ajustables) ; disponibilité / stock / marge viennent de l’API.
 
-## Déploiement Railway
+## Déploiement (Vercel + Railway)
 
-Le dépôt est un **monorepo**. Railway doit builder **uniquement** `backend-nest/` :
+### Railway (API Nest) — Root Directory = `backend-nest`
+1. Settings → Root Directory: `backend-nest`
+2. Variables: `JWT_SECRET`, `DATA_SOURCE=mock` (hors réseau FGT)
+3. Networking → **Generate Domain** → copier l’URL (ex. `https://….up.railway.app`)
 
-1. Service Settings → **Root Directory** = `backend-nest`
-2. Builder = Dockerfile (fichier fourni)
-3. Variables :
-   - `JWT_SECRET` = secret fort
-   - `DATA_SOURCE` = `mock` (recommandé hors réseau FGT) **ou** `api` si l’API FGT est joignable
-   - `FGT_API_BASE_URL` / `FGT_CUSTOMER_NO` / `FGT_TYPE_DOC` si `DATA_SOURCE=api`
-4. Exposer le service (Generate Domain)
+### Vercel (frontend React) — Root Directory = `frontend`
+1. Import repo `meziania/FGT_Brand`
+2. Root Directory: **`frontend`**
+3. Framework: Vite · Build: `npm run build` · Output: `dist`
+4. Environment Variable:
+   - `VITE_API_URL` = URL Railway **sans** slash final  
+     (ex. `https://xxxx.up.railway.app`)
+5. Redeploy après avoir défini `VITE_API_URL`
 
-**Limites :**
-- SQLite = données **éphémères** sur Railway (pas de volume → reset au redeploy)
-- L’API FGT `192.168.1.xxx` n’est **pas** accessible depuis Railway (cloud US) → utiliser `DATA_SOURCE=mock` pour une démo publique, ou déployer en local / VPN
+Sans `VITE_API_URL`, le front appelle `/api` sur le domaine Vercel → 404.
 
-Frontend : déployer à part (Vercel ou 2ᵉ service Railway avec Root Directory = `frontend`).
+**Limites:** SQLite éphémère sur Railway ; API FGT locale inaccessible → `DATA_SOURCE=mock`.

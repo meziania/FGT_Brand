@@ -162,6 +162,23 @@ export type BrandReview = {
 
 const TOKEN_KEY = 'fgt_token'
 
+/**
+ * Base URL de l'API Nest.
+ * En local: vide → chemins relatifs `/api/...` (proxy Vite).
+ * En prod (Vercel): `VITE_API_URL` = URL publique Railway (sans slash final).
+ */
+function apiBase(): string {
+  const raw = (import.meta.env.VITE_API_URL as string | undefined)?.trim() || ''
+  return raw.replace(/\/$/, '')
+}
+
+/** Construit une URL API absolue ou relative selon l'environnement. */
+function apiUrl(path: string): string {
+  const base = apiBase()
+  if (!base) return path
+  return path.startsWith('/') ? `${base}${path}` : `${base}/${path}`
+}
+
 /** Lit le jeton JWT stocké localement pour les appels API authentifiés. */
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
@@ -187,7 +204,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers.set('Content-Type', 'application/json')
   }
 
-  const res = await fetch(path, { ...options, headers })
+  const res = await fetch(apiUrl(path), { ...options, headers })
   if (res.status === 401) {
     setToken(null)
     throw new Error('Session expirée — reconnectez-vous')

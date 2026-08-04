@@ -11,7 +11,7 @@ async function bootstrap() {
   app.enableCors({ origin: true, credentials: true });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   const port = Number(process.env.PORT || 8000);
-  await app.listen(port);
-  console.log(`FGT Launch Control Tower (NestJS) → http://127.0.0.1:${port}`);
+  await app.listen(port, '0.0.0.0');
+  console.log(`FGT Launch Control Tower (NestJS) → http://0.0.0.0:${port}`);
 }
 bootstrap();
