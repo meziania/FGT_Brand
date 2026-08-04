@@ -18,9 +18,6 @@ export class AppController {
    */
   @Get()
   root() {
-    // Note: global prefix is /api, so expose also via brands? 
-    // We'll mount a non-prefixed root in main — actually global prefix applies.
-    // Frontend hits / which won't work with global prefix. Fix main.ts.
     const source = (this.config.get('DATA_SOURCE') || 'api').toLowerCase();
     const base = this.config.get('FGT_API_BASE_URL') || '';
     return {
@@ -28,9 +25,9 @@ export class AppController {
       data_source: source,
       docs: '/api',
       note:
-        source === 'api' || source === 'fgt' || source === 'bc'
-          ? `API FGT active (${base}/api/articleList)`
-          : 'Mode mock — set DATA_SOURCE=api',
+        source === 'mock'
+          ? 'Mode mock (démo cloud / hors réseau FGT)'
+          : `API FGT configurée (${base || 'default'}) — fallback mock si injoignable`,
       stack: 'NestJS + TypeScript + TypeORM + SQLite',
     };
   }

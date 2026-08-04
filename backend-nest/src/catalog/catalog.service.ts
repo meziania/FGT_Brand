@@ -120,27 +120,49 @@ export class CatalogService {
     } else {
       try {
         const base = this.config.get('FGT_API_BASE_URL') || 'http://192.168.1.125:7691';
-        const res = await fetch(`${base.replace(/\/$/, '')}/api/articleList`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            customerNo: this.config.get('FGT_CUSTOMER_NO') || 'CA000500',
-            typeDoc: this.config.get('FGT_TYPE_DOC') || 'VENTE',
-          }),
-        });
-        if (!res.ok) throw new Error(`FGT API error ${res.status}`);
-        const data = (await res.json()) as {
-          success?: boolean;
-          ArticleList?: string | { Items: unknown[] };
-        };
-        if (!data.success) throw new Error('FGT API success=false');
-        let articleList = data.ArticleList;
-        if (typeof articleList === 'string') articleList = JSON.parse(articleList);
-        raw = ((articleList as { Items?: Record<string, unknown>[] })?.Items || []) as Record<
-          string,
-          unknown
-        >[];
-        source = 'api';
+        // Réseau privé / LAN → ne pas bloquer Railway/Vercel
+        const host = new URL(base).hostname;
+        const isPrivate =
+          host === 'localhost' ||
+          host === '127.0.0.1' ||
+          host.startsWith('192.168.') ||
+          host.startsWith('10.') ||
+          /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+        if (isPrivate && process.env.NODE_ENV === 'production') {
+          console.warn(`[catalog] Private FGT host ${host} in production → mock`);
+          raw = this.mockRaw();
+          source = 'mock-fallback';
+        } else {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 5000);
+          let res: Response;
+          try {
+            res = await fetch(`${base.replace(/\/$/, '')}/api/articleList`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                customerNo: this.config.get('FGT_CUSTOMER_NO') || 'CA000500',
+                typeDoc: this.config.get('FGT_TYPE_DOC') || 'VENTE',
+              }),
+              signal: controller.signal,
+            });
+          } finally {
+            clearTimeout(timer);
+          }
+          if (!res.ok) throw new Error(`FGT API error ${res.status}`);
+          const data = (await res.json()) as {
+            success?: boolean;
+            ArticleList?: string | { Items: unknown[] };
+          };
+          if (!data.success) throw new Error('FGT API success=false');
+          let articleList = data.ArticleList;
+          if (typeof articleList === 'string') articleList = JSON.parse(articleList);
+          raw = ((articleList as { Items?: Record<string, unknown>[] })?.Items || []) as Record<
+            string,
+            unknown
+          >[];
+          source = 'api';
+        }
       } catch (err) {
         // Cloud (Railway) ne peut pas joindre l'API LAN FGT → catalogue de démo
         console.warn(
