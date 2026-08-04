@@ -211,12 +211,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
   if (!res.ok) {
     let detail = `Erreur ${res.status}`
+    if (res.status === 405 && !apiBase()) {
+      detail =
+        'API non branchée (405). Sur Vercel, définis VITE_API_URL = URL Railway (sans /) puis redeploy.'
+    }
     try {
       const data = await res.json()
       detail = data.detail || data.message || detail
       if (Array.isArray(detail)) detail = detail.map((d: { message?: string }) => d.message || d).join(', ')
     } catch {
-      /* ignore */
+      /* keep detail */
     }
     throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
   }
