@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Env & secrets
+.env
+.env.local
+.env.*.local
+
+# Build
+dist/
+build/
+coverage/
+
+# Nest / TS
+*.tsbuildinfo
+
+# SQLite local DB
+*.db
+*.db-journal
+fgt_launch.db
+
+# Logs & OS
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Python leftovers (if any)
+.venv/
+__pycache__/
+*.pyc
+
+# Vite
+frontend/dist/
