@@ -1,5 +1,6 @@
 import { Link, NavLink } from 'react-router-dom'
 import type { ReactNode } from 'react'
+import { roleLabel } from './api'
 import { useAuth } from './auth'
 
 /** Fournit le cadre commun des pages authentifiées avec navigation, en-tête et zone de contenu. */
@@ -29,7 +30,7 @@ export function AppShell({
           <NavLink to="/catalog">Catalogue API</NavLink>
         </nav>
         <div className="topbar-actions">
-          <span className="role-chip">{user?.role}</span>
+          <span className="role-chip">{roleLabel(user?.role) || user?.role}</span>
           <span className="muted-light">{user?.full_name}</span>
           <button className="btn ghost small" type="button" onClick={logout}>
             Déconnexion

@@ -44,12 +44,14 @@ npm run dev
 
 ## Fonctionnalités
 
-- Auth JWT + rôles
-- Control Tower (sync marques API, alertes stock)
-- Stage-Gate G0→G7 + checklists + EXIT/MATURITY
-- Plans d’actions (owner, SLA, livrable, clôture)
-- Health Score (manuel ou depuis stock API)
-- Routines Lundi / Vendredi
+- Auth JWT + 7 rôles (Direction, Développement, métiers)
+- Control Tower (KPI, alertes Health/stock, escalades SLA §9)
+- Stage-Gate G0→G7 + checklists + décisions spécifiques (RETEST, RENEGOTIATE, EXTEND_RANGE…)
+- Plans d’actions (priorité, cause, preuve de clôture, escalade J-2→J+7)
+- Launch Health Score (+ action corrective auto si orange/rouge/critique)
+- Maturity Score G7 (dimensions distinctes)
+- Routines Lundi / Vendredi + Brand Review Cause→Action
+- Seed démo : NOVA (dev G3), SOLARA (launch Health rouge), OLIVA (G7)
 - Catalogue articles API (cache 5 min)
 
 ## Note API

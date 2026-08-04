@@ -148,11 +148,54 @@ export function computeHealthScore(dims: {
 
 export const MANAGERS = new Set(['direction', 'developpement']);
 
+/** Métiers opérationnels du manuel (hors Direction / Développement). */
+export const OPERATIONAL_ROLES = new Set([
+  'commercial',
+  'marketing',
+  'achats',
+  'supply',
+  'finance',
+]);
+
 /**
- * Indique si un rôle dispose des droits de management.
- * Sert aux contrôleurs pour restreindre les décisions et actions sensibles.
+ * Indique si un rôle dispose des droits de management (Direction ou Développement).
  */
 export const isManager = (role: string) => MANAGERS.has(role);
+
+/** Responsable Développement = Business Owner du projet (cahier). */
+export const isDevOwner = (role: string) => role === 'developpement';
+
+/** Direction = vue stratégique / validation comités. */
+export const isDirection = (role: string) => role === 'direction';
+
+/** Métiers opérationnels (Commercial, Marketing, etc.). */
+export const isOperational = (role: string) => OPERATIONAL_ROLES.has(role);
+
+/** Création marque / checklist = Développement uniquement. */
+export const canCreateBrand = (role: string) => isDevOwner(role);
+export const canEditChecklist = (role: string) => isDevOwner(role);
+
+/**
+ * Décision de Gate : Développement (toutes) ; Direction (G6 Launch + G7 Maturity).
+ */
+export const canDecideGate = (role: string, gate: string) => {
+  if (isDevOwner(role)) return true;
+  if (isDirection(role)) return gate === 'G6' || gate === 'G7';
+  return false;
+};
+
+/** Health Score calcul / override : Direction + Développement. */
+export const canComputeHealth = (role: string) => isManager(role);
+
+/** Sync marques API : Développement. */
+export const canSyncBrands = (role: string) => isDevOwner(role);
+
+/** Libellé français du niveau de vue (manuel §6). */
+export function roleViewLevel(role: string): 'direction' | 'developpement' | 'operationnel' {
+  if (isDirection(role)) return 'direction';
+  if (isDevOwner(role)) return 'developpement';
+  return 'operationnel';
+}
 
 /** Décisions autorisées sur G7 (Maturity Review — manuel §10). */
 export const G7_DECISIONS = new Set([
@@ -160,10 +203,125 @@ export const G7_DECISIONS = new Set([
   'ACCELERATE',
   'CORRECT',
   'REPOSITION',
-  'EXTEND',
+  'EXTEND_RANGE',
+  'EXTEND', // alias accepté
   'HOLD',
   'EXIT',
 ]);
+
+/** Décisions par gate (manuel §3) — hors PENDING. */
+export const GATE_DECISIONS: Record<string, string[]> = {
+  G0: ['GO', 'HOLD', 'NO_GO'],
+  G1: ['GO', 'HOLD', 'NO_GO'],
+  G2: ['GO', 'HOLD', 'NO_GO'],
+  G3: ['GO', 'HOLD', 'NO_GO'],
+  G4: ['GO', 'RETEST', 'NO_GO'],
+  G5: ['GO', 'RENEGOTIATE', 'NO_GO'],
+  G6: ['GO', 'CONDITIONAL_GO', 'HOLD', 'NO_GO'],
+  G7: ['MATURITY', 'ACCELERATE', 'CORRECT', 'REPOSITION', 'EXTEND_RANGE', 'HOLD', 'EXIT'],
+};
+
+/**
+ * Liste les décisions autorisées pour une gate (avec PENDING pour saisie partielle).
+ */
+export function decisionsForGate(gate: string): string[] {
+  const g = gate.toUpperCase();
+  return [...(GATE_DECISIONS[g] || ['GO', 'HOLD', 'NO_GO', 'CORRECT']), 'PENDING'];
+}
+
+/**
+ * Valide qu'une décision est autorisée pour la gate (PENDING toujours OK).
+ */
+export function isAllowedGateDecision(gate: string, decision: string): boolean {
+  const d = decision.toUpperCase().replace(/-/g, '_');
+  if (d === 'PENDING') return true;
+  const allowed = GATE_DECISIONS[gate.toUpperCase()] || [];
+  if (allowed.includes(d)) return true;
+  if (gate.toUpperCase() === 'G7' && (d === 'EXTEND' || d === 'EXTEND_RANGE')) return true;
+  return false;
+}
+
+/**
+ * Maturity Score G7 (§10) — dimensions distinctes du Launch Health Score.
+ */
+export function computeMaturityScore(dims: {
+  ca_vs_bc: number;
+  rentabilite: number;
+  distribution: number;
+  reachat: number;
+  supply_stabilite: number;
+  stock_sain: number;
+  autonomie: number;
+  execution: number;
+}): { score: number; status: string; eligible: boolean } {
+  const weights = {
+    ca_vs_bc: 20,
+    rentabilite: 15,
+    distribution: 15,
+    reachat: 15,
+    supply_stabilite: 10,
+    stock_sain: 10,
+    autonomie: 10,
+    execution: 5,
+  };
+  const total = Object.values(weights).reduce((a, b) => a + b, 0);
+  const score =
+    (dims.ca_vs_bc * weights.ca_vs_bc +
+      dims.rentabilite * weights.rentabilite +
+      dims.distribution * weights.distribution +
+      dims.reachat * weights.reachat +
+      dims.supply_stabilite * weights.supply_stabilite +
+      dims.stock_sain * weights.stock_sain +
+      dims.autonomie * weights.autonomie +
+      dims.execution * weights.execution) /
+    total;
+  let status = 'critique';
+  if (score >= 85) status = 'vert';
+  else if (score >= 70) status = 'orange';
+  else if (score >= 50) status = 'rouge';
+  return {
+    score: Math.round(score * 10) / 10,
+    status,
+    eligible: score >= 70,
+  };
+}
+
+/** Statuts Health qui imposent un plan d'action correctif (§6). */
+export const HEALTH_STATUSES_REQUIRING_ACTION = new Set(['orange', 'rouge', 'critique']);
+
+/**
+ * Gabarit d'action obligatoire selon le statut Health Score.
+ */
+export function healthForcedActionTemplate(
+  brandCode: string,
+  status: string,
+): { code: string; title: string; owner_role: string; sla_days: number; priority: string } {
+  const map: Record<string, { title: string; sla_days: number; priority: string }> = {
+    orange: {
+      title: `Plan correctif Health orange — ${brandCode}`,
+      sla_days: 10,
+      priority: 'medium',
+    },
+    rouge: {
+      title: `Plan correctif Health rouge — ${brandCode}`,
+      sla_days: 5,
+      priority: 'high',
+    },
+    critique: {
+      title: `Plan d'urgence Health critique — ${brandCode}`,
+      sla_days: 3,
+      priority: 'critical',
+    },
+  };
+  const row = map[status] || map.orange;
+  return {
+    code: `HS-${status.toUpperCase()}-001`,
+    title: row.title,
+    owner_role: 'commercial',
+    sla_days: row.sla_days,
+    priority: row.priority,
+  };
+}
 
 /** Statuts d'action considérés comme clos (non éligibles au passage overdue). */
 export const CLOSED_ACTION_STATUSES = new Set(['done', 'cancelled']);
@@ -173,6 +331,38 @@ export const CLOSED_ACTION_STATUSES = new Set(['done', 'cancelled']);
  */
 export function todayIsoDate(now = new Date()): string {
   return now.toISOString().slice(0, 10);
+}
+
+/**
+ * Nombre de jours calendaires depuis due_date (positif = en retard).
+ */
+export function daysPastDue(
+  dueDate: string | null | undefined,
+  today = todayIsoDate(),
+): number {
+  if (!dueDate) return 0;
+  const due = Date.parse(`${dueDate}T00:00:00Z`);
+  const now = Date.parse(`${today}T00:00:00Z`);
+  if (Number.isNaN(due) || Number.isNaN(now)) return 0;
+  return Math.floor((now - due) / 86400000);
+}
+
+/**
+ * Niveau d'escalade SLA (§9) : none | reminder | overdue | manager | direction.
+ * J-2 reminder, J+1 overdue, J+3 manager, J+7 Direction.
+ */
+export function escalationLevelFromDueDate(
+  status: string,
+  dueDate: string | null | undefined,
+  today = todayIsoDate(),
+): 'none' | 'reminder' | 'overdue' | 'manager' | 'direction' {
+  if (!dueDate || CLOSED_ACTION_STATUSES.has(status)) return 'none';
+  const days = daysPastDue(dueDate, today);
+  if (days >= 7) return 'direction';
+  if (days >= 3) return 'manager';
+  if (days >= 1) return 'overdue';
+  if (days >= -2 && days <= 0) return 'reminder';
+  return 'none';
 }
 
 /**

@@ -2,7 +2,14 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   api,
+  canComputeHealth,
+  canDecideGate,
+  canEditChecklist,
+  decisionsForGate,
+  escalationLabel,
+  isDevOwner,
   isManager,
+  isOperational,
   type ActionItem,
   type Brand,
   type BrandSnapshot,
@@ -10,32 +17,12 @@ import {
   type Gate,
   type HealthDimensionMeta,
   type HealthScore,
+  type MaturityScore,
 } from '../api'
 import { useAuth } from '../auth'
 import { AppShell, BackLink } from '../AppShell'
 
 const GATES = ['G0', 'G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7']
-
-/** Décisions génériques (G0–G6). */
-const DECISIONS_DEFAULT = [
-  'GO',
-  'HOLD',
-  'NO_GO',
-  'CONDITIONAL_GO',
-  'CORRECT',
-  'PENDING',
-]
-
-/** Décisions G7 selon le manuel (Maturity Review). */
-const DECISIONS_G7 = [
-  'MATURITY',
-  'ACCELERATE',
-  'CORRECT',
-  'REPOSITION',
-  'EXTEND',
-  'HOLD',
-  'EXIT',
-]
 
 const ROLES = ['developpement', 'commercial', 'marketing', 'achats', 'supply', 'finance', 'direction']
 const HEALTH_FIELDS = [
@@ -63,6 +50,10 @@ export function BrandDetailPage() {
   const id = Number(brandId)
   const { user } = useAuth()
   const manager = isManager(user?.role)
+  const canChecklist = canEditChecklist(user?.role)
+  const canHealth = canComputeHealth(user?.role)
+  const ops = isOperational(user?.role)
+
   const [brand, setBrand] = useState<Brand | null>(null)
   const [gates, setGates] = useState<Gate[]>([])
   const [actions, setActions] = useState<ActionItem[]>([])
@@ -75,16 +66,30 @@ export function BrandDetailPage() {
   const [checklist, setChecklist] = useState<ChecklistItem[]>([])
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
+  const [maturity, setMaturity] = useState<MaturityScore | null>(null)
+  const [maturityForm, setMaturityForm] = useState({
+    ca_vs_bc: 80,
+    rentabilite: 80,
+    distribution: 80,
+    reachat: 80,
+    supply_stabilite: 80,
+    stock_sain: 80,
+    autonomie: 80,
+    execution: 80,
+  })
 
-  const decisions = selectedGate === 'G7' ? DECISIONS_G7 : DECISIONS_DEFAULT
+  const canDecide = canDecideGate(user?.role, selectedGate)
+  const decisions = decisionsForGate(selectedGate)
 
   const [actionForm, setActionForm] = useState({
     code: '',
     title: '',
-    owner_role: user?.role === 'commercial' ? 'commercial' : 'commercial',
+    owner_role: ops && user?.role ? user.role : 'commercial',
     sla_days: 5,
     deliverable: '',
     close_condition: '',
+    priority: 'medium',
+    root_cause: '',
   })
 
   const [healthForm, setHealthForm] = useState({
@@ -133,6 +138,13 @@ export function BrandDetailPage() {
       }
     } catch {
       setSnapshot(null)
+    }
+    try {
+      const mat = await api.getMaturity(id)
+      setMaturity(mat)
+      if (mat.dimensions) setMaturityForm(mat.dimensions)
+    } catch {
+      setMaturity(null)
     }
   }
 
@@ -186,7 +198,15 @@ export function BrandDetailPage() {
         ...actionForm,
         sla_days: Number(actionForm.sla_days),
       })
-      setActionForm((f) => ({ ...f, code: '', title: '', deliverable: '', close_condition: '' }))
+      setActionForm((f) => ({
+        ...f,
+        code: '',
+        title: '',
+        deliverable: '',
+        close_condition: '',
+        root_cause: '',
+        priority: 'medium',
+      }))
       setMsg('Action créée')
       await load()
     } catch (err) {
@@ -194,10 +214,19 @@ export function BrandDetailPage() {
     }
   }
 
-  /** Marque une action comme terminée puis rafraîchit la liste des actions. */
+  /** Marque une action comme terminée (preuve obligatoire §9). */
   async function markDone(actionId: number) {
-    await api.updateAction(actionId, { status: 'done' })
-    await load()
+    const evidence = window.prompt('Preuve de clôture (obligatoire §9) :', 'Livrable validé')
+    if (!evidence?.trim()) {
+      setError('Clôture annulée — preuve requise')
+      return
+    }
+    try {
+      await api.updateAction(actionId, { status: 'done', evidence: evidence.trim() })
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Échec clôture')
+    }
   }
 
   /** Demande au backend de calculer le Health Score à partir des données stock API. */
@@ -208,7 +237,9 @@ export function BrandDetailPage() {
       const res = await api.healthFromApi(id, healthForm.period)
       if (res.dimensions?.length) setDimMeta(res.dimensions)
       setMsg(
-        `Score API: ${res.health.score} (${res.health.status}) · stock API intégré`,
+        `Score API: ${res.health.score} (${res.health.status})${
+          res.forced_action ? ` · action forcée ${res.forced_action.code}` : ''
+        }`,
       )
       await load()
     } catch (err) {
@@ -223,10 +254,28 @@ export function BrandDetailPage() {
     setMsg('')
     try {
       const row = await api.computeHealth(id, healthForm)
-      setMsg(`Health Score calculé: ${row.score} (${row.status})`)
+      setMsg(
+        `Health Score: ${row.score} (${row.status})${
+          row.forced_action ? ` · action forcée ${row.forced_action.code}` : ''
+        }`,
+      )
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Échec score')
+    }
+  }
+
+  async function onComputeMaturity(e: FormEvent) {
+    e.preventDefault()
+    setError('')
+    setMsg('')
+    try {
+      const row = await api.computeMaturity(id, maturityForm)
+      setMaturity(row)
+      setMsg(`Maturity Score: ${row.score} (${row.status}) — ${row.message || ''}`)
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Échec Maturity Score')
     }
   }
 
@@ -275,7 +324,7 @@ export function BrandDetailPage() {
                   <div className="value">{snapshot.suggested_health.disponibilite}%</div>
                 </div>
               </div>
-              {manager && (
+              {canHealth && (
                 <button className="btn" type="button" onClick={() => void onHealthFromApi()}>
                   Calculer Health Score depuis API
                 </button>
@@ -337,7 +386,7 @@ export function BrandDetailPage() {
                   <input
                     type="checkbox"
                     checked={item.done}
-                    disabled={!manager}
+                    disabled={!canChecklist}
                     onChange={(e) => {
                       const next = [...checklist]
                       next[idx] = { ...item, done: e.target.checked }
@@ -349,13 +398,18 @@ export function BrandDetailPage() {
               ))}
               {checklist.length === 0 && <p className="muted">Aucune checklist</p>}
             </div>
-            {manager && (
+            {canChecklist && (
               <button className="btn ghost" type="button" onClick={saveChecklist} style={{ marginTop: 8 }}>
                 Enregistrer checklist
               </button>
             )}
+            {!canChecklist && (
+              <p className="muted" style={{ marginTop: 8, fontSize: '0.85rem' }}>
+                Checklist en lecture seule — saisie réservée au Développement.
+              </p>
+            )}
 
-            {manager && (
+            {canDecide ? (
               <form onSubmit={onDecide} style={{ marginTop: '1rem' }}>
                 <div className="row">
                   <div className="field" style={{ marginBottom: 0 }}>
@@ -365,7 +419,7 @@ export function BrandDetailPage() {
                       onChange={(e) => {
                         const g = e.target.value
                         setSelectedGate(g)
-                        setDecision(g === 'G7' ? 'MATURITY' : 'GO')
+                        setDecision(decisionsForGate(g)[0])
                       }}
                     >
                       {GATES.map((g) => (
@@ -397,10 +451,17 @@ export function BrandDetailPage() {
                   </button>
                 </div>
                 <p className="muted" style={{ marginTop: 8, fontSize: '0.85rem' }}>
-                  GO / MATURITY impossibles si checklist incomplète. Sur G7: MATURITY = marque mature,
-                  EXIT = sortie du portefeuille (pas de suppression).
+                  {isDevOwner(user?.role)
+                    ? 'GO / MATURITY impossibles si checklist incomplète. Sur G7: MATURITY = marque mature, EXIT = sortie du portefeuille.'
+                    : 'Direction : décisions limitées à G6 (Launch) et G7 (Maturity).'}
                 </p>
               </form>
+            ) : (
+              <p className="muted" style={{ marginTop: '1rem', fontSize: '0.85rem' }}>
+                {manager
+                  ? `Sélectionnez G6 ou G7 pour décider (gate actuelle : ${selectedGate}).`
+                  : 'Décisions Stage-Gate réservées au Développement (G0–G7) et à la Direction (G6–G7).'}
+              </p>
             )}
           </div>
 
@@ -416,7 +477,7 @@ export function BrandDetailPage() {
               <p className="muted">Aucun score calculé pour cette marque.</p>
             )}
 
-            {manager && (
+            {canHealth && (
               <form onSubmit={onComputeHealth}>
                 <div className="field">
                   <label>Période</label>
@@ -484,6 +545,59 @@ export function BrandDetailPage() {
           </div>
 
           <div className="panel">
+            <h2>Maturity Score G7</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Score distinct du Launch Health Score (manuel §10). M+12 = éligibilité, pas maturité
+              automatique.
+            </p>
+            {maturity?.score != null ? (
+              <div className="row" style={{ alignItems: 'baseline', gap: '1rem', marginBottom: '1rem' }}>
+                <div className="score-big">{maturity.score}</div>
+                <span className={`status ${maturity.status || ''}`}>{maturity.status}</span>
+                <span className="muted">
+                  {maturity.eligible ? 'Éligible Maturity Review' : 'Non éligible (&lt; 70)'}
+                </span>
+              </div>
+            ) : (
+              <p className="muted">Aucun Maturity Score calculé.</p>
+            )}
+            {canHealth && (
+              <form onSubmit={onComputeMaturity}>
+                <div className="health-grid">
+                  {(
+                    [
+                      ['ca_vs_bc', 'CA vs Business Case (20%)'],
+                      ['rentabilite', 'Rentabilité (15%)'],
+                      ['distribution', 'Distribution (15%)'],
+                      ['reachat', 'Réachat (15%)'],
+                      ['supply_stabilite', 'Stabilité Supply (10%)'],
+                      ['stock_sain', 'Stock sain (10%)'],
+                      ['autonomie', 'Autonomie (10%)'],
+                      ['execution', 'Exécution (5%)'],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <div className="field" key={key}>
+                      <label>{label}</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={maturityForm[key]}
+                        onChange={(e) =>
+                          setMaturityForm({ ...maturityForm, [key]: Number(e.target.value) })
+                        }
+                      />
+                    </div>
+                  ))}
+                </div>
+                <button className="btn" type="submit">
+                  Calculer Maturity Score
+                </button>
+              </form>
+            )}
+          </div>
+
+          <div className="panel">
             <h2>Plans d’actions</h2>
             <form onSubmit={onCreateAction} style={{ marginBottom: '1rem' }}>
               <div className="row">
@@ -518,6 +632,19 @@ export function BrandDetailPage() {
                   </select>
                 </div>
                 <div className="field" style={{ marginBottom: 0 }}>
+                  <label>Priorité</label>
+                  <select
+                    value={actionForm.priority}
+                    onChange={(e) => setActionForm({ ...actionForm, priority: e.target.value })}
+                  >
+                    {['low', 'medium', 'high', 'critical'].map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field" style={{ marginBottom: 0 }}>
                   <label>SLA (j)</label>
                   <input
                     type="number"
@@ -530,6 +657,13 @@ export function BrandDetailPage() {
                 </div>
               </div>
               <div className="row" style={{ marginTop: 8 }}>
+                <div className="field" style={{ marginBottom: 0, flex: 1 }}>
+                  <label>Cause racine</label>
+                  <input
+                    value={actionForm.root_cause}
+                    onChange={(e) => setActionForm({ ...actionForm, root_cause: e.target.value })}
+                  />
+                </div>
                 <div className="field" style={{ marginBottom: 0, flex: 1 }}>
                   <label>Livrable</label>
                   <input
@@ -558,7 +692,9 @@ export function BrandDetailPage() {
                   <th>Code</th>
                   <th>Titre</th>
                   <th>Owner</th>
+                  <th>Priorité</th>
                   <th>Échéance</th>
+                  <th>Escalade</th>
                   <th>Statut</th>
                   <th></th>
                 </tr>
@@ -569,13 +705,20 @@ export function BrandDetailPage() {
                     <td>{a.code}</td>
                     <td>
                       {a.title}
+                      {a.root_cause && <div className="muted">Cause: {a.root_cause}</div>}
                       {a.deliverable && <div className="muted">{a.deliverable}</div>}
                       {a.close_condition && (
                         <div className="muted">Clôture: {a.close_condition}</div>
                       )}
                     </td>
                     <td>{a.owner_role}</td>
+                    <td>{a.priority ?? 'medium'}</td>
                     <td>{a.due_date ?? '—'}</td>
+                    <td>
+                      <span className={`status ${a.escalation_level || 'none'}`}>
+                        {escalationLabel(a.escalation_level)}
+                      </span>
+                    </td>
                     <td>
                       <span className={`status ${a.status}`}>{a.status}</span>
                     </td>
@@ -594,7 +737,7 @@ export function BrandDetailPage() {
                 ))}
                 {actions.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="muted">
+                    <td colSpan={8} className="muted">
                       Aucune action
                     </td>
                   </tr>

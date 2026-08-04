@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CatalogService } from '../catalog/catalog.service';
-import { isManager, parseChecklist, checklistComplete, shouldMarkOverdue } from '../common/domain';
+import { isManager, isOperational, parseChecklist, checklistComplete, shouldMarkOverdue, escalationLevelFromDueDate } from '../common/domain';
 import { ActionItem } from '../entities/action-item.entity';
 import { Brand } from '../entities/brand.entity';
 import { GateReview } from '../entities/gate-review.entity';
@@ -31,17 +31,29 @@ export class RoutinesController {
   ) {}
 
   private async visibleBrands(user: User) {
-    void user;
-    return this.brands.find({ order: { code: 'ASC' } });
+    const all = await this.brands.find({ order: { code: 'ASC' } });
+    if (!isOperational(user.role)) return all;
+    const myActions = await this.actions.find({ where: { owner_role: user.role } });
+    const linked = new Set(myActions.map((a) => a.brand_id));
+    return all.filter(
+      (b) => ['launch', 'mature', 'exited'].includes(b.phase) || linked.has(b.id),
+    );
   }
 
   /** Recalcule overdue avant agrégation des routines. */
   private async syncOverdue(actions: ActionItem[]) {
     for (const action of actions) {
+      let dirty = false;
       if (shouldMarkOverdue(action.status, action.due_date) && action.status !== 'overdue') {
         action.status = 'overdue';
-        await this.actions.save(action);
+        dirty = true;
       }
+      const level = escalationLevelFromDueDate(action.status, action.due_date);
+      if (action.escalation_level !== level) {
+        action.escalation_level = level;
+        dirty = true;
+      }
+      if (dirty) await this.actions.save(action);
     }
     return actions;
   }

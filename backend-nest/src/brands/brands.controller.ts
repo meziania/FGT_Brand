@@ -21,13 +21,24 @@ import {
   ChecklistItem,
   G7_DECISIONS,
   GATES,
+  canComputeHealth,
+  canCreateBrand,
+  canDecideGate,
+  canEditChecklist,
   checklistComplete,
   computeHealthScore,
+  computeMaturityScore,
   defaultChecklist,
+  escalationLevelFromDueDate,
+  healthForcedActionTemplate,
+  HEALTH_STATUSES_REQUIRING_ACTION,
+  isAllowedGateDecision,
   isManager,
+  isOperational,
   isPositiveGateDecision,
   parseChecklist,
   previousGateCode,
+  roleViewLevel,
   shouldMarkOverdue,
 } from '../common/domain';
 import { ActionItem } from '../entities/action-item.entity';
@@ -62,24 +73,68 @@ export class BrandsController {
     }
   }
 
+  private requireDevOwner(user: User) {
+    if (!canCreateBrand(user.role)) {
+      throw new ForbiddenException('Réservé au Responsable Développement (Business Owner)');
+    }
+  }
+
   /**
    * Passe en `overdue` les actions dont l'échéance est dépassée (hors done/cancelled).
    * Appelé à la lecture Control Tower / listes d'actions pour refléter la réalité des SLA.
    */
   private async syncOverdueStatuses(actions: ActionItem[]): Promise<ActionItem[]> {
     for (const action of actions) {
+      let dirty = false;
       if (shouldMarkOverdue(action.status, action.due_date) && action.status !== 'overdue') {
         action.status = 'overdue';
-        await this.actions.save(action);
+        dirty = true;
       }
+      const level = escalationLevelFromDueDate(action.status, action.due_date);
+      if (action.escalation_level !== level) {
+        action.escalation_level = level;
+        dirty = true;
+      }
+      if (dirty) await this.actions.save(action);
     }
     return actions;
   }
 
+  /** Crée une action corrective si le Health Score l'exige (§6). */
+  private async ensureHealthForcedAction(brand: Brand, status: string) {
+    if (!HEALTH_STATUSES_REQUIRING_ACTION.has(status)) return null;
+    const tpl = healthForcedActionTemplate(brand.code, status);
+    const existing = await this.actions.find({ where: { brand_id: brand.id, code: tpl.code } });
+    const open = existing.find((a) => !['done', 'cancelled'].includes(a.status));
+    if (open) return open;
+    return this.actions.save({
+      brand_id: brand.id,
+      code: tpl.code,
+      title: tpl.title,
+      owner_role: tpl.owner_role,
+      approver_role: 'developpement',
+      sla_days: tpl.sla_days,
+      due_date: new Date(Date.now() + tpl.sla_days * 86400000).toISOString().slice(0, 10),
+      deliverable: 'Plan Cause → Décision → Action (Brand Review)',
+      close_condition: status === 'critique' ? 'Health ≥ 70 et risques clos' : 'Health Score ≥ 70',
+      status: 'open',
+      priority: tpl.priority,
+      source: 'health',
+      root_cause: `Health Score ${status}`,
+      expected_result: 'Retour statut vert ou orange stable',
+      evidence: null,
+      escalation_level: 'none',
+    });
+  }
+
   private async visibleBrands(user: User) {
-    // Tous les rôles voient les marques pilotage (y compris imports API)
-    void user;
-    return this.brands.find({ order: { code: 'ASC' } });
+    const all = await this.brands.find({ order: { code: 'ASC' } });
+    if (!isOperational(user.role)) return all;
+    const myActions = await this.actions.find({ where: { owner_role: user.role } });
+    const linked = new Set(myActions.map((a) => a.brand_id));
+    return all.filter(
+      (b) => ['launch', 'mature', 'exited'].includes(b.phase) || linked.has(b.id),
+    );
   }
 
   private gateOut(review: GateReview) {
@@ -117,6 +172,8 @@ export class BrandsController {
   }
 
   private actionOut(a: ActionItem, brand_code?: string | null) {
+    const escalation =
+      a.escalation_level || escalationLevelFromDueDate(a.status, a.due_date);
     return {
       id: a.id,
       brand_id: a.brand_id,
@@ -129,6 +186,12 @@ export class BrandsController {
       due_date: a.due_date,
       deliverable: a.deliverable,
       close_condition: a.close_condition,
+      priority: a.priority || 'medium',
+      source: a.source,
+      root_cause: a.root_cause,
+      expected_result: a.expected_result,
+      evidence: a.evidence,
+      escalation_level: escalation,
       brand_code: brand_code ?? null,
     };
   }
@@ -181,7 +244,12 @@ export class BrandsController {
     const critical = [
       ...new Set(
         scores
-          .filter((s) => ['rouge', 'critique'].includes(s.status) && (isManager(user.role) || brandIds.has(s.brand_id)))
+          .filter(
+            (s) =>
+              s.period !== 'MATURITY' &&
+              ['rouge', 'critique'].includes(s.status) &&
+              (isManager(user.role) || brandIds.has(s.brand_id)),
+          )
           .map((s) => map[s.brand_id] || '?'),
       ),
     ].sort();
@@ -199,11 +267,22 @@ export class BrandsController {
       in_launch: brands.filter((b) => b.phase === 'launch').length,
       actions_open: actions.filter((a) => ['open', 'in_progress', 'overdue'].includes(a.status)).length,
       actions_overdue: actions.filter((a) => a.status === 'overdue').length,
+      escalations: {
+        reminder: actions.filter((a) => a.escalation_level === 'reminder').length,
+        overdue: actions.filter((a) => a.escalation_level === 'overdue').length,
+        manager: actions.filter((a) => a.escalation_level === 'manager').length,
+        direction: actions.filter((a) => a.escalation_level === 'direction').length,
+      },
+      escalation_actions: actions
+        .filter((a) => ['reminder', 'overdue', 'manager', 'direction'].includes(a.escalation_level))
+        .slice(0, 20)
+        .map((a) => this.actionOut(a, map[a.brand_id])),
       critical_brands: critical,
       stock_alerts: stock_alerts.slice(0, 15),
       stock_alerts_count: stock_alerts.length,
       data_source: this.config.get('DATA_SOURCE') || 'api',
       role_view: user.role,
+      view_level: roleViewLevel(user.role),
     };
   }
 
@@ -225,7 +304,7 @@ export class BrandsController {
     @Req() req: { user: User },
     @Body() body: { code: string; name: string; supplier?: string; notes?: string },
   ) {
-    this.requireManager(req.user);
+    this.requireDevOwner(req.user);
     const code = body.code.toUpperCase();
     if (await this.brands.findOne({ where: { code } })) {
       throw new BadRequestException('Code marque déjà utilisé');
@@ -275,7 +354,9 @@ export class BrandsController {
     @Param('gate') gate: string,
     @Body() body: { items: ChecklistItem[] },
   ) {
-    this.requireManager(req.user);
+    if (!canEditChecklist(req.user.role)) {
+      throw new ForbiddenException('Checklist réservée au Responsable Développement');
+    }
     const review = await this.gates.findOne({ where: { brand_id: id, gate: gate.toUpperCase() } });
     if (!review) throw new NotFoundException('Gate introuvable');
     review.checklist_json = JSON.stringify(body.items);
@@ -298,12 +379,26 @@ export class BrandsController {
     const brand = await this.brands.findOne({ where: { id } });
     if (!brand) throw new NotFoundException('Marque introuvable');
     const gate = gateParam.toUpperCase();
+    if (!canDecideGate(req.user.role, gate)) {
+      throw new ForbiddenException(
+        req.user.role === 'direction'
+          ? 'Direction : décisions autorisées sur G6 (Launch) et G7 (Maturity) uniquement'
+          : 'Décision Gate réservée au pilotage (Développement / Direction)',
+      );
+    }
     const decision = (body.decision || '').toUpperCase().replace(/-/g, '_');
+    if (!isAllowedGateDecision(gate, decision)) {
+      throw new BadRequestException(
+        `Décision ${decision} non autorisée pour ${gate}`,
+      );
+    }
     if (gate === 'G7' && !G7_DECISIONS.has(decision) && decision !== 'PENDING') {
       throw new BadRequestException(
         `Décision G7 invalide. Autorisées: ${[...G7_DECISIONS].join(', ')}`,
       );
     }
+    // Normalise alias EXTEND → EXTEND_RANGE
+    const normalizedDecision = decision === 'EXTEND' ? 'EXTEND_RANGE' : decision;
     let review = await this.gates.findOne({ where: { brand_id: id, gate } });
     if (!review) {
       review = await this.gates.save({
@@ -315,26 +410,25 @@ export class BrandsController {
       });
     }
     const items = parseChecklist(review.checklist_json, gate);
-    if (isPositiveGateDecision(decision)) {
+    if (isPositiveGateDecision(normalizedDecision)) {
       if (!checklistComplete(items)) {
         throw new BadRequestException('Checklist Gate incomplète — livrables minimum non validés');
       }
       await this.assertPreviousGateValidated(id, gate);
     }
-    review.decision = decision;
+    review.decision = normalizedDecision;
     review.comment = body.comment ?? null;
     review.decided_at = new Date();
     review.decided_by = req.user.full_name;
     review.source = 'manual';
     brand.current_gate = gate;
-    if (decision === 'GO' && gate === 'G6') {
+    if (normalizedDecision === 'GO' && gate === 'G6') {
       brand.phase = 'launch';
       if (!brand.launch_date) brand.launch_date = new Date().toISOString().slice(0, 10);
     }
     if (gate === 'G7') {
-      if (decision === 'MATURITY') brand.phase = 'mature';
-      else if (decision === 'EXIT') brand.phase = 'exited';
-      // ACCELERATE / CORRECT / REPOSITION / EXTEND / HOLD : phase inchangée
+      if (normalizedDecision === 'MATURITY') brand.phase = 'mature';
+      else if (normalizedDecision === 'EXIT') brand.phase = 'exited';
     }
     await this.gates.save(review);
     await this.brands.save(brand);
@@ -363,6 +457,9 @@ export class BrandsController {
     @Body() body?: { period?: string },
   ) {
     this.requireManager(req.user);
+    if (!canComputeHealth(req.user.role)) {
+      throw new ForbiddenException('Health Score réservé à Direction / Développement');
+    }
     const brand = await this.brands.findOne({ where: { id } });
     if (!brand) throw new NotFoundException('Marque introuvable');
     const snap = await this.catalog.brandSnapshotForBrand(brand);
@@ -401,14 +498,23 @@ export class BrandsController {
           deliverable: 'Plan réappro / transfert',
           close_condition: 'Zero stock SKU = 0',
           status: 'open',
+          priority: 'critical',
+          source: 'stock_api',
+          root_cause: 'Rupture stock API',
+          expected_result: 'Disponibilité rétablie',
+          evidence: null,
+          escalation_level: 'none',
         });
       }
     }
+
+    const forced = await this.ensureHealthForcedAction(brand, status);
 
     return {
       health: row,
       snapshot: snap,
       dimensions: snap.dimensions,
+      forced_action: forced ? this.actionOut(forced, brand.code) : null,
     };
   }
 
@@ -444,6 +550,10 @@ export class BrandsController {
       deliverable?: string;
       close_condition?: string;
       approver_role?: string;
+      priority?: string;
+      source?: string;
+      root_cause?: string;
+      expected_result?: string;
     },
   ) {
     const brand = await this.brands.findOne({ where: { id } });
@@ -466,6 +576,12 @@ export class BrandsController {
       deliverable: body.deliverable ?? null,
       close_condition: body.close_condition ?? null,
       status: 'open',
+      priority: body.priority || 'medium',
+      source: body.source || 'manual',
+      root_cause: body.root_cause ?? null,
+      expected_result: body.expected_result ?? null,
+      evidence: null,
+      escalation_level: escalationLevelFromDueDate('open', due),
     });
     return this.actionOut(action, brand.code);
   }
@@ -486,6 +602,10 @@ export class BrandsController {
       deliverable?: string;
       close_condition?: string;
       owner_role?: string;
+      priority?: string;
+      root_cause?: string;
+      expected_result?: string;
+      evidence?: string;
     },
   ) {
     const action = await this.actions.findOne({ where: { id: actionId } });
@@ -493,12 +613,20 @@ export class BrandsController {
     if (!isManager(req.user.role) && action.owner_role !== req.user.role) {
       throw new ForbiddenException('Action hors de votre périmètre');
     }
+    if (body.status === 'done' && !(body.evidence || action.evidence)) {
+      throw new BadRequestException('Preuve (evidence) obligatoire pour clôturer une action (§9)');
+    }
     if (body.status !== undefined) action.status = body.status;
     if (body.due_date !== undefined) action.due_date = body.due_date;
     if (body.title !== undefined) action.title = body.title;
     if (body.deliverable !== undefined) action.deliverable = body.deliverable;
     if (body.close_condition !== undefined) action.close_condition = body.close_condition;
     if (body.owner_role !== undefined && isManager(req.user.role)) action.owner_role = body.owner_role;
+    if (body.priority !== undefined) action.priority = body.priority;
+    if (body.root_cause !== undefined) action.root_cause = body.root_cause;
+    if (body.expected_result !== undefined) action.expected_result = body.expected_result;
+    if (body.evidence !== undefined) action.evidence = body.evidence;
+    action.escalation_level = escalationLevelFromDueDate(action.status, action.due_date);
     await this.actions.save(action);
     const brand = await this.brands.findOne({ where: { id: action.brand_id } });
     return this.actionOut(action, brand?.code);
@@ -510,7 +638,11 @@ export class BrandsController {
    */
   @Get('brands/:id/health')
   async listHealth(@Param('id', ParseIntPipe) id: number) {
-    return this.scores.find({ where: { brand_id: id }, order: { computed_at: 'DESC' } });
+    const rows = await this.scores.find({
+      where: { brand_id: id },
+      order: { computed_at: 'DESC' },
+    });
+    return rows.filter((r) => r.period !== 'MATURITY');
   }
 
   /**
@@ -539,7 +671,7 @@ export class BrandsController {
     const brand = await this.brands.findOne({ where: { id } });
     if (!brand) throw new NotFoundException('Marque introuvable');
     const { score, status } = computeHealthScore(body);
-    return this.scores.save({
+    const row = await this.scores.save({
       brand_id: id,
       period: body.period || 'M1',
       score,
@@ -554,5 +686,99 @@ export class BrandsController {
       marketing: body.marketing,
       override_critical: body.override_critical || false,
     });
+    const forced = await this.ensureHealthForcedAction(brand, status);
+    return {
+      ...row,
+      forced_action: forced ? this.actionOut(forced, brand.code) : null,
+    };
+  }
+
+  /**
+   * Calcule / enregistre le Maturity Score G7 (§10) — dimensions distinctes du Health Score.
+   */
+  @Post('brands/:id/maturity')
+  async computeMaturity(
+    @Req() req: { user: User },
+    @Param('id', ParseIntPipe) id: number,
+    @Body()
+    body: {
+      ca_vs_bc: number;
+      rentabilite: number;
+      distribution: number;
+      reachat: number;
+      supply_stabilite: number;
+      stock_sain: number;
+      autonomie: number;
+      execution: number;
+    },
+  ) {
+    this.requireManager(req.user);
+    const brand = await this.brands.findOne({ where: { id } });
+    if (!brand) throw new NotFoundException('Marque introuvable');
+    const { score, status, eligible } = computeMaturityScore(body);
+    // Stocké dans health_scores avec period MATURITY (mapping colonnes)
+    const row = await this.scores.save({
+      brand_id: id,
+      period: 'MATURITY',
+      score,
+      status,
+      ca_vs_forecast: body.ca_vs_bc,
+      marge: body.rentabilite,
+      distribution: body.distribution,
+      rotation: body.reachat,
+      disponibilite: body.supply_stabilite,
+      stock: body.stock_sain,
+      clients_actifs: body.autonomie,
+      marketing: body.execution,
+      override_critical: false,
+    });
+    return {
+      score,
+      status,
+      eligible,
+      message: eligible
+        ? 'Éligible Maturity Review (score ≥ 70) — décision G7 requise'
+        : 'Non éligible maturité (score < 70) — CORRECT / HOLD recommandés',
+      dimensions: {
+        ca_vs_bc: body.ca_vs_bc,
+        rentabilite: body.rentabilite,
+        distribution: body.distribution,
+        reachat: body.reachat,
+        supply_stabilite: body.supply_stabilite,
+        stock_sain: body.stock_sain,
+        autonomie: body.autonomie,
+        execution: body.execution,
+      },
+      stored: row,
+    };
+  }
+
+  @Get('brands/:id/maturity')
+  async getMaturity(@Param('id', ParseIntPipe) id: number) {
+    const brand = await this.brands.findOne({ where: { id } });
+    if (!brand) throw new NotFoundException('Marque introuvable');
+    const rows = await this.scores.find({
+      where: { brand_id: id, period: 'MATURITY' },
+      order: { computed_at: 'DESC' },
+      take: 1,
+    });
+    const row = rows[0];
+    if (!row) return { score: null, status: null, eligible: false, dimensions: null };
+    return {
+      score: row.score,
+      status: row.status,
+      eligible: row.score >= 70,
+      dimensions: {
+        ca_vs_bc: row.ca_vs_forecast,
+        rentabilite: row.marge,
+        distribution: row.distribution,
+        reachat: row.rotation,
+        supply_stabilite: row.disponibilite,
+        stock_sain: row.stock,
+        autonomie: row.clients_actifs,
+        execution: row.marketing,
+      },
+      computed_at: row.computed_at,
+    };
   }
 }

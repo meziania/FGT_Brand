@@ -25,6 +25,24 @@ export type ControlTower = {
   in_launch: number
   actions_open: number
   actions_overdue: number
+  escalations?: {
+    reminder: number
+    overdue: number
+    manager: number
+    direction: number
+  }
+  escalation_actions?: Array<{
+    id: number
+    brand_id: number
+    code: string
+    title: string
+    owner_role: string
+    status: string
+    due_date: string | null
+    escalation_level?: string
+    brand_code?: string | null
+    priority?: string
+  }>
   critical_brands: string[]
   stock_alerts?: {
     marque: string
@@ -37,6 +55,7 @@ export type ControlTower = {
   stock_alerts_count?: number
   data_source: string
   role_view: string
+  view_level?: 'direction' | 'developpement' | 'operationnel'
 }
 
 /** Métadonnée de transparence pour une dimension Health Score (estimée ou réelle). */
@@ -114,7 +133,32 @@ export type ActionItem = {
   due_date: string | null
   deliverable: string | null
   close_condition?: string | null
+  priority?: string
+  source?: string | null
+  root_cause?: string | null
+  expected_result?: string | null
+  evidence?: string | null
+  escalation_level?: string
   brand_code?: string | null
+}
+
+/** Maturity Score G7 (§10). */
+export type MaturityScore = {
+  score: number | null
+  status: string | null
+  eligible: boolean
+  dimensions: {
+    ca_vs_bc: number
+    rentabilite: number
+    distribution: number
+    reachat: number
+    supply_stabilite: number
+    stock_sain: number
+    autonomie: number
+    execution: number
+  } | null
+  message?: string
+  computed_at?: string
 }
 
 /** Représente un score de santé calculé pour une marque sur une période donnée. */
@@ -190,9 +234,95 @@ export function setToken(token: string | null) {
   else localStorage.removeItem(TOKEN_KEY)
 }
 
-/** Indique si le rôle dispose des droits de pilotage manager dans l'interface. */
+/** Indique si le rôle dispose des droits de management (Direction ou Développement). */
 export function isManager(role?: string) {
   return role === 'direction' || role === 'developpement'
+}
+
+/** Responsable Développement = Business Owner. */
+export function isDevOwner(role?: string) {
+  return role === 'developpement'
+}
+
+/** Direction stratégique. */
+export function isDirection(role?: string) {
+  return role === 'direction'
+}
+
+/** Métier opérationnel. */
+export function isOperational(role?: string) {
+  return !!role && !isManager(role)
+}
+
+export function canCreateBrand(role?: string) {
+  return isDevOwner(role)
+}
+
+export function canEditChecklist(role?: string) {
+  return isDevOwner(role)
+}
+
+export function canDecideGate(role?: string, gate?: string) {
+  if (isDevOwner(role)) return true
+  if (isDirection(role)) return gate === 'G6' || gate === 'G7'
+  return false
+}
+
+export function canComputeHealth(role?: string) {
+  return isManager(role)
+}
+
+export function canSyncBrands(role?: string) {
+  return isDevOwner(role)
+}
+
+export function roleLabel(role?: string) {
+  const map: Record<string, string> = {
+    direction: 'Direction',
+    developpement: 'Développement',
+    commercial: 'Commercial',
+    marketing: 'Marketing',
+    achats: 'Achats',
+    supply: 'Supply Chain',
+    finance: 'Finance',
+  }
+  return role ? map[role] || role : ''
+}
+
+export function viewLevelBlurb(role?: string) {
+  if (isDirection(role)) {
+    return 'Vue Direction — KPI synthétiques, alertes, décisions G6/G7'
+  }
+  if (isDevOwner(role)) {
+    return 'Vue Développement — pilotage Stage-Gate, Health Score, sync API'
+  }
+  return 'Vue opérationnelle — vos actions et marques en lancement'
+}
+
+/** Décisions Stage-Gate selon le manuel (§3 / §10). */
+export function decisionsForGate(gate: string): string[] {
+  const map: Record<string, string[]> = {
+    G0: ['GO', 'HOLD', 'NO_GO'],
+    G1: ['GO', 'HOLD', 'NO_GO'],
+    G2: ['GO', 'HOLD', 'NO_GO'],
+    G3: ['GO', 'HOLD', 'NO_GO'],
+    G4: ['GO', 'RETEST', 'NO_GO'],
+    G5: ['GO', 'RENEGOTIATE', 'NO_GO'],
+    G6: ['GO', 'CONDITIONAL_GO', 'HOLD', 'NO_GO'],
+    G7: ['MATURITY', 'ACCELERATE', 'CORRECT', 'REPOSITION', 'EXTEND_RANGE', 'HOLD', 'EXIT'],
+  }
+  return map[gate] || ['GO', 'HOLD', 'NO_GO']
+}
+
+export function escalationLabel(level?: string) {
+  const map: Record<string, string> = {
+    none: '—',
+    reminder: 'J-2 rappel',
+    overdue: 'J+1 overdue',
+    manager: 'J+3 manager',
+    direction: 'J+7 Direction',
+  }
+  return level ? map[level] || level : '—'
 }
 
 /** Exécute une requête HTTP vers le backend en ajoutant l'authentification et la gestion d'erreurs commune. */
@@ -280,6 +410,10 @@ export const api = {
       due_date?: string
       deliverable?: string
       close_condition?: string
+      priority?: string
+      source?: string
+      root_cause?: string
+      expected_result?: string
     },
   ) =>
     request<ActionItem>(`/api/brands/${brandId}/actions`, {
@@ -310,7 +444,7 @@ export const api = {
       override_critical?: boolean
     },
   ) =>
-    request<HealthScore>(`/api/brands/${brandId}/health`, {
+    request<HealthScore & { forced_action?: ActionItem | null }>(`/api/brands/${brandId}/health`, {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
@@ -318,10 +452,24 @@ export const api = {
   brandSnapshot: (brandId: number) => request<BrandSnapshot>(`/api/brands/${brandId}/api-snapshot`),
   /** Calcule un Health Score à partir des données stock issues de l'API FGT. */
   healthFromApi: (brandId: number, period = 'M1') =>
-    request<{ health: HealthScore; snapshot: BrandSnapshot; dimensions?: HealthDimensionMeta[] }>(
-      `/api/brands/${brandId}/health/from-api`,
-      { method: 'POST', body: JSON.stringify({ period }) },
-    ),
+    request<{
+      health: HealthScore
+      snapshot: BrandSnapshot
+      dimensions?: HealthDimensionMeta[]
+      forced_action?: ActionItem | null
+    }>(`/api/brands/${brandId}/health/from-api`, {
+      method: 'POST',
+      body: JSON.stringify({ period }),
+    }),
+  getMaturity: (brandId: number) => request<MaturityScore>(`/api/brands/${brandId}/maturity`),
+  computeMaturity: (
+    brandId: number,
+    payload: NonNullable<MaturityScore['dimensions']>,
+  ) =>
+    request<MaturityScore>(`/api/brands/${brandId}/maturity`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   /** Charge les données de la routine Control Tower du lundi. */
   monday: () => request<RoutineMonday>('/api/routines/monday'),
   /** Charge les données de la routine Action Review du vendredi. */

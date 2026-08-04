@@ -2,7 +2,7 @@ import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
 
 /**
  * Représente une action opérationnelle liée à une marque.
- * Porte le rôle responsable, les délais, les livrables et l'état de suivi.
+ * Aligné sur le manuel §9 (owner, SLA, priorité, cause, preuve, escalade).
  */
 @Entity('action_items')
 export class ActionItem {
@@ -38,4 +38,27 @@ export class ActionItem {
 
   @Column({ type: 'varchar', nullable: true })
   close_condition!: string | null;
+
+  /** low | medium | high | critical */
+  @Column({ default: 'medium' })
+  priority!: string;
+
+  /** gate | health | brand_review | stock_api | manual */
+  @Column({ type: 'varchar', nullable: true })
+  source!: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  root_cause!: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  expected_result!: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  evidence!: string | null;
+
+  /**
+   * none | reminder | overdue | manager | direction — recalculé à la lecture.
+   */
+  @Column({ default: 'none' })
+  escalation_level!: string;
 }

@@ -56,6 +56,30 @@ export function LoginPage() {
         <button className="btn" type="submit" disabled={busy}>
           {busy ? 'Connexion…' : 'Se connecter'}
         </button>
+        <div className="demo-accounts">
+          <p className="muted">Comptes démo · mot de passe <code>fgt123</code></p>
+          <ul>
+            <li>
+              <button type="button" className="linkish" onClick={() => { setEmail('dev@fgt.local'); setPassword('fgt123') }}>
+                dev@fgt.local
+              </button>
+              — Développement (Business Owner)
+            </li>
+            <li>
+              <button type="button" className="linkish" onClick={() => { setEmail('direction@fgt.local'); setPassword('fgt123') }}>
+                direction@fgt.local
+              </button>
+              — Direction (G6/G7)
+            </li>
+            <li>
+              <button type="button" className="linkish" onClick={() => { setEmail('commercial@fgt.local'); setPassword('fgt123') }}>
+                commercial@fgt.local
+              </button>
+              — Commercial (ops)
+            </li>
+            <li className="muted">+ marketing / achats / supply / finance @fgt.local</li>
+          </ul>
+        </div>
       </form>
     </div>
   )

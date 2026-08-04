@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, type RoutineFriday, type RoutineMonday } from '../api'
+import { api, escalationLabel, type RoutineFriday, type RoutineMonday } from '../api'
 import { AppShell } from '../AppShell'
 
 /** Présente les routines hebdomadaires de pilotage et bascule entre lundi et vendredi. */
@@ -86,6 +86,7 @@ export function RoutinesPage() {
                   <th>Titre</th>
                   <th>Owner</th>
                   <th>Échéance</th>
+                  <th>Escalade</th>
                 </tr>
               </thead>
               <tbody>
@@ -96,11 +97,16 @@ export function RoutinesPage() {
                     <td>{a.title}</td>
                     <td>{a.owner_role}</td>
                     <td>{a.due_date}</td>
+                    <td>
+                      <span className={`status ${a.escalation_level || 'overdue'}`}>
+                        {escalationLabel(a.escalation_level)}
+                      </span>
+                    </td>
                   </tr>
                 ))}
                 {monday.overdue_actions.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="muted">
+                    <td colSpan={6} className="muted">
                       Aucune action en retard
                     </td>
                   </tr>

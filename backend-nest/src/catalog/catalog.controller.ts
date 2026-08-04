@@ -1,6 +1,8 @@
-import { Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { canSyncBrands } from '../common/domain';
+import { User } from '../entities/user.entity';
 import { CatalogService } from './catalog.service';
 
 /**
@@ -58,7 +60,10 @@ export class CatalogController {
    * Peut forcer le rafraîchissement du cache avant l'import.
    */
   @Post('sync-brands')
-  async syncBrands(@Query('force') force?: string) {
+  async syncBrands(@Req() req: { user: User }, @Query('force') force?: string) {
+    if (!canSyncBrands(req.user.role)) {
+      throw new ForbiddenException('Sync API réservée au Responsable Développement');
+    }
     const result = await this.catalog.syncBrandsToPilotage(force === '1');
     return {
       data_source: this.catalog.getDataSourceLabel(),

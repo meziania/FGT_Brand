@@ -1,6 +1,17 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { api, isManager, type Brand, type ControlTower } from '../api'
+import {
+  api,
+  canCreateBrand,
+  canSyncBrands,
+  isDirection,
+  isDevOwner,
+  isOperational,
+  roleLabel,
+  viewLevelBlurb,
+  type Brand,
+  type ControlTower,
+} from '../api'
 import { useAuth } from '../auth'
 import { AppShell } from '../AppShell'
 
@@ -18,13 +29,15 @@ export function DashboardPage() {
   /** Recharge les indicateurs et marques, avec une synchronisation API opportuniste. */
   async function load() {
     setMsg('')
-    try {
-      const sync = await api.syncBrands(false)
-      if (sync.created > 0) {
-        setMsg(`${sync.created} marques API importées dans Control Tower`)
+    if (canSyncBrands(user?.role)) {
+      try {
+        const sync = await api.syncBrands(false)
+        if (sync.created > 0) {
+          setMsg(`${sync.created} marques API importées dans Control Tower`)
+        }
+      } catch {
+        // sync optionnel si API down
       }
-    } catch {
-      // sync optionnel si API down
     }
     const [t, b] = await Promise.all([api.controlTower(), api.brands()])
     setTower(t)
@@ -33,9 +46,9 @@ export function DashboardPage() {
 
   useEffect(() => {
     load().catch((err) => setError(err instanceof Error ? err.message : 'Erreur chargement'))
-  }, [])
+  }, [user?.role])
 
-  /** Crée une marque depuis le formulaire manager puis rafraîchit la Control Tower. */
+  /** Crée une marque depuis le formulaire Développement puis rafraîchit la Control Tower. */
   async function onCreateBrand(e: FormEvent) {
     e.preventDefault()
     setError('')
@@ -63,9 +76,10 @@ export function DashboardPage() {
           <h1>
             Control <span>Tower</span>
           </h1>
-          <p>
-            Vue hebdomadaire: marques, actions et alertes Health Score. Vue rôle:{' '}
-            {tower?.role_view ?? '…'} · source {tower?.data_source ?? '…'}.
+          <p>{viewLevelBlurb(user?.role)}</p>
+          <p className="muted">
+            Rôle {roleLabel(user?.role)} · niveau {tower?.view_level ?? '…'} · source{' '}
+            {tower?.data_source ?? '…'}
           </p>
         </>
       }
@@ -73,23 +87,41 @@ export function DashboardPage() {
       {error && <p className="error">{error}</p>}
       {msg && <p className="ok-msg">{msg}</p>}
 
-      <div className="row" style={{ marginBottom: '1rem' }}>
-        <button
-          className="btn ghost"
-          type="button"
-          onClick={() =>
-            api
-              .syncBrands(true)
-              .then((s) => {
-                setMsg(`Sync API: +${s.created} créées / ${s.skipped} déjà présentes`)
-                return load()
-              })
-              .catch((err) => setError(err instanceof Error ? err.message : 'Sync échouée'))
-          }
-        >
-          Synchroniser marques API
-        </button>
-      </div>
+      {isOperational(user?.role) && (
+        <p className="ok-msg">
+          Vue métier : marques en lancement et actions dont vous êtes owner ({user?.role}).
+        </p>
+      )}
+      {isDirection(user?.role) && (
+        <p className="ok-msg">
+          Direction : focus KPI / alertes. Décisions Gate limitées à G6 (Launch) et G7 (Maturity).
+        </p>
+      )}
+      {isDevOwner(user?.role) && (
+        <p className="ok-msg">
+          Développement (Business Owner) : création marques, checklists, Stage-Gate G0–G7, sync API.
+        </p>
+      )}
+
+      {canSyncBrands(user?.role) && (
+        <div className="row" style={{ marginBottom: '1rem' }}>
+          <button
+            className="btn ghost"
+            type="button"
+            onClick={() =>
+              api
+                .syncBrands(true)
+                .then((s) => {
+                  setMsg(`Sync API: +${s.created} créées / ${s.skipped} déjà présentes`)
+                  return load()
+                })
+                .catch((err) => setError(err instanceof Error ? err.message : 'Sync échouée'))
+            }
+          >
+            Synchroniser marques API
+          </button>
+        </div>
+      )}
 
       {tower && (
         <div className="grid-metrics">
@@ -110,9 +142,54 @@ export function DashboardPage() {
             <div className="value">{tower.actions_open}</div>
           </div>
           <div className="metric">
+            <div className="label">Escalade Direction</div>
+            <div className="value">{tower.escalations?.direction ?? 0}</div>
+          </div>
+          <div className="metric">
+            <div className="label">Escalade Manager</div>
+            <div className="value">{tower.escalations?.manager ?? 0}</div>
+          </div>
+          <div className="metric">
             <div className="label">Alertes stock API</div>
             <div className="value">{tower.stock_alerts_count ?? 0}</div>
           </div>
+        </div>
+      )}
+
+      {tower && (tower.escalation_actions?.length ?? 0) > 0 && (
+        <div className="panel">
+          <h2>Escalades SLA (§9)</h2>
+          <p className="muted">
+            J-2 rappel · J+1 overdue · J+3 manager · J+7 Direction
+          </p>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Marque</th>
+                <th>Action</th>
+                <th>Owner</th>
+                <th>Échéance</th>
+                <th>Niveau</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tower.escalation_actions!.map((a) => (
+                <tr key={a.id}>
+                  <td>
+                    <Link to={`/brands/${a.brand_id}`}>{a.brand_code}</Link>
+                  </td>
+                  <td>
+                    {a.code} — {a.title}
+                  </td>
+                  <td>{a.owner_role}</td>
+                  <td>{a.due_date}</td>
+                  <td>
+                    <span className={`status ${a.escalation_level}`}>{a.escalation_level}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
@@ -153,7 +230,7 @@ export function DashboardPage() {
         </div>
       )}
 
-      {isManager(user?.role) && (
+      {canCreateBrand(user?.role) && (
         <div className="panel">
           <h2>Nouvelle marque (opportunité)</h2>
           <form onSubmit={onCreateBrand} className="row">

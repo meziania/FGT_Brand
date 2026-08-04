@@ -47,6 +47,6 @@ export class AppModule implements OnModuleInit {
    */
   async onModuleInit() {
     await this.seed.seedUsers();
-    await this.seed.clearDemoBrands();
+    await this.seed.seedDemoScenario();
   }
 }
